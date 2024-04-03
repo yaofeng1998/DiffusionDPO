@@ -1,6 +1,6 @@
 #!/bin/bash
-export MODEL_NAME="/home/fengyao/stable-diffusion-v1-5"
-export DATASET_NAME="/home/fengyao/pickapic_v2"
+export MODEL_NAME="/home/fengyao/cephfs-thu/stable-diffusion-v1-5"
+export DATASET_NAME="/home/fengyao/cephfs-thu/pickapic_v2"
 
 # Effective BS will be (N_GPU * train_batch_size * gradient_accumulation_steps)
 # Paper used 2048. Training takes ~24 hours / 2000 steps

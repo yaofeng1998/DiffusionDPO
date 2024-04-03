@@ -101,6 +101,7 @@ def import_model_class_from_model_name_or_path(
 
 
 def log_validation(vae, text_encoder, tokenizer, unet, ref_unet, args, accelerator, weight_dtype, global_step, selector=None):
+    torch.cuda.empty_cache()
     logger.info("Running validation... ")
     time_begin = time.time()
 
@@ -1218,7 +1219,7 @@ def main():
                     prefered_latents, disprefered_latents = latents.chunk(2)
                     difference = prefered_latents - disprefered_latents
                     sft_lambda_offset = args.sft_lambda * (1 - epoch / args.num_train_epochs) ** 2 * difference
-                    latents += sft_lambda_offset
+                    latents = prefered_latents + sft_lambda_offset
                 
                 noisy_latents = noise_scheduler.add_noise(latents,
                                                           new_noise if args.input_perturbation else noise,

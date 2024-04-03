@@ -1,6 +1,7 @@
 #!/bin/bash
 export MODEL_NAME="$HOME/cephfs-thu/stable-diffusion-v1-5"
 export DATASET_NAME="$HOME/cephfs-thu/pickapic_v2"
+export CACHE_DIR="$HOME/cephfs-thu/.cache"
 
 # Effective BS will be (N_GPU * train_batch_size * gradient_accumulation_steps)
 # Paper used 2048. Training takes ~24 hours / 2000 steps
@@ -33,4 +34,5 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=${GPUs} accelerate launch --num_processe
   --checkpointing_steps 500 \
   --sft \
   --sft_lambda 0.2 \
+  --cache_dir=$CACHE_DIR \
    --output_dir="tmp-sd15-sft-lambda-0.2-0403" > sd15-sft-lambda-0.2-0403.txt 2>&1 &

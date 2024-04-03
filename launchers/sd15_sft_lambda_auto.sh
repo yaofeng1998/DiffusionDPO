@@ -4,8 +4,8 @@ export DATASET_NAME="/home/fengyao/cephfs-thu/pickapic_v2"
 
 # Effective BS will be (N_GPU * train_batch_size * gradient_accumulation_steps)
 # Paper used 2048. Training takes ~24 hours / 2000 steps
-NUM_PROCESSES=2
-BATCH_SIZE=4
+NUM_PROCESSES=$1
+BATCH_SIZE=$2
 LENGTH_LIMIT=$((2 * $NUM_PROCESSES - 1))
 DATALOADER_NUM_WORKERS=$((2 * $NUM_PROCESSES))
 GRADIENT_ACCUMULATION_STEPS=$((2048 / $NUM_PROCESSES / $BATCH_SIZE))

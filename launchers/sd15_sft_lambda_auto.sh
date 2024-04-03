@@ -33,4 +33,4 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=${GPUs} accelerate launch --num_processe
   --checkpointing_steps 500 \
   --sft \
   --sft_lambda 0.2 \
-   --output_dir="tmp-sd15-sft-lambda-0.2-0401" > sd15-sft-lambda-0.2-0401.txt 2>&1 &
+   --output_dir="tmp-sd15-sft-lambda-0.2-0403" > sd15-sft-lambda-0.2-0403.txt 2>&1 &

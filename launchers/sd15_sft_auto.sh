@@ -33,5 +33,5 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=${GPUs} accelerate launch --num_processe
   --learning_rate=1e-8 --scale_lr \
   --checkpointing_steps 500 \
   --sft \
-   --output_dir="tmp-sd15-sft-0325" > sd15-sft-0403.txt 2>&1 &
+   --output_dir="tmp-sd15-sft-0403" > sd15-sft-0403.txt 2>&1 &
 

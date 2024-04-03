@@ -6,8 +6,9 @@ import os
 
 # load model
 
-processor_name_or_path = f"{os.environ["HOME"]}/cephfs-thu/CLIP-ViT-H-14-laion2B-s32B-b79K"
-model_pretrained_name_or_path = f"{os.environ["HOME"]}/cephfs-thu/PickScore_v1"
+home = os.environ["HOME"]
+processor_name_or_path = f"{home}/cephfs-thu/CLIP-ViT-H-14-laion2B-s32B-b79K"
+model_pretrained_name_or_path = f"{home}/cephfs-thu/PickScore_v1"
 
 
 class Selector():

@@ -1,3 +1,4 @@
+#!/bin/bash
 export MODEL_NAME="/home/huayu/stable-diffusion-v1-5"
 export DATASET_NAME="/home/huayu/pickapic_v2"
 

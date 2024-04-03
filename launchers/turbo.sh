@@ -1,3 +1,4 @@
+#!/bin/bash
 export MODEL_NAME="stabilityai/sdxl-turbo"
 export VAE="madebyollin/sdxl-vae-fp16-fix"
 export DATASET_NAME="yuvalkirstain/pickapic_v2"

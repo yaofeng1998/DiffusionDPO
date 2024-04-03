@@ -1,3 +1,4 @@
+#!/bin/bash
 export MODEL_NAME="stabilityai/stable-diffusion-xl-base-1.0"
 export VAE="madebyollin/sdxl-vae-fp16-fix"
 export DATASET_NAME="yuvalkirstain/pickapic_v2"

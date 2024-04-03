@@ -5,7 +5,7 @@ export DATASET_NAME="/home/huayu/pickapic_v2"
 # Effective BS will be (N_GPU * train_batch_size * gradient_accumulation_steps)
 # Paper used 2048. Training takes ~24 hours / 2000 steps
 
-PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=2,3,4,5,6,7,8,9 accelerate launch --num_processes 8 --main_process_port 6001 train.py  \
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=2,3,4,5,6,7,8,9 accelerate launch --num_processes 8 --main_process_port 6002 train.py  \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --dataset_name=$DATASET_NAME \
   --train_batch_size=8 \
@@ -15,6 +15,6 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=2,3,4,5,6,7,8,9 accelerate launch --num_
   --lr_scheduler="constant_with_warmup" --lr_warmup_steps=500 \
   --learning_rate=1e-8 --scale_lr \
   --checkpointing_steps 500 \
-  --beta_dpo 2000 \
-   --output_dir="tmp-sd15-dpo-0321" > sd15-dpo-0321.txt 2>&1 &
+  --sft \
+   --output_dir="tmp-sd15-sft-0323" > sd15-sft0323.txt 2>&1 &
 

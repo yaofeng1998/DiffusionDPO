@@ -18,6 +18,9 @@ import io
 import logging
 import math
 import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+import math
 import random
 import shutil
 import sys
@@ -31,7 +34,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
-from accelerate import Accelerator
+from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -48,6 +51,9 @@ from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNe
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
 from diffusers.utils.import_utils import is_xformers_available
+from utils.pickscore_utils import Selector
+import time
+from datetime import timedelta
 
 
 if is_wandb_available():
@@ -92,6 +98,89 @@ def import_model_class_from_model_name_or_path(
         return CLIPTextModelWithProjection
     else:
         raise ValueError(f"{model_class} is not supported.")
+
+
+def log_validation(vae, text_encoder, tokenizer, unet, ref_unet, args, accelerator, weight_dtype, global_step, selector=None):
+    logger.info("Running validation... ")
+    time_begin = time.time()
+
+    pipeline = StableDiffusionPipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        vae=accelerator.unwrap_model(vae),
+        text_encoder=accelerator.unwrap_model(text_encoder),
+        tokenizer=tokenizer,
+        unet=accelerator.unwrap_model(unet),
+        safety_checker=None,
+        revision=args.revision,
+        torch_dtype=weight_dtype,
+    )
+    print(weight_dtype)
+    pipeline = pipeline.to(accelerator.device)
+    pipeline.set_progress_bar_config(disable=True)
+
+    # if args.enable_xformers_memory_efficient_attention:
+    #     pipeline.enable_xformers_memory_efficient_attention()
+
+    generator = torch.Generator(device=accelerator.device).manual_seed(0)
+    
+    ps_selector = selector if selector is not None else Selector('cuda')
+    
+    images = []
+    scores = []
+    for i in range(50):
+        generator = torch.Generator(device='cuda')
+        generator = generator.manual_seed(0)
+        with torch.autocast("cuda"):
+            img = pipeline(prompt=args.validation_prompts[i*10:(i+1)*10], generator=generator).images
+            score = ps_selector.score(img,args.validation_prompts[i*10:(i+1)*10])
+        images += img
+        scores += score
+        
+        
+    pipeline.unet = accelerator.unwrap_model(ref_unet)
+    pipeline = pipeline.to(accelerator.device)
+    
+    baseline_images = []
+    baseline_scores = []
+    for i in range(50):
+        generator = torch.Generator(device='cuda')
+        generator = generator.manual_seed(0)
+        with torch.autocast("cuda"):
+            img = pipeline(prompt=args.validation_prompts[i*10:(i+1)*10], generator=generator).images
+            score = ps_selector.score(img,args.validation_prompts[i*10:(i+1)*10])
+        baseline_images += img
+        baseline_scores += score
+        
+    # for tracker in accelerator.trackers:
+    #     if tracker.name == "tensorboard":
+    #         np_images = np.stack([np.asarray(img) for img in images])
+    #         tracker.writer.add_images("validation", np_images, global_step, dataformats="NHWC")
+    #     elif tracker.name == "wandb":
+    #         tracker.log(
+    #             {
+    #                 "validation": [
+    #                     wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}")
+    #                     for i, image in enumerate(images[:10])
+    #                 ]
+    #             }
+    #         )
+    #     else:
+    #         logger.warn(f"image logging not implemented for {tracker.name}")
+
+    scores = np.array(scores)
+    baseline_scores = np.array(baseline_scores)
+    accelerator.log({"mean_pickapic_score": np.mean(scores)}, step=global_step)
+    accelerator.log({"mean_winrate": np.mean(scores > baseline_scores) + np.mean(scores == baseline_scores) * 0.5}, step=global_step)
+    accelerator.log({"baseline_score": np.mean(baseline_scores)}, step=global_step)
+    accelerator.log({"score_diff": np.mean(scores - baseline_scores)}, step=global_step)
+    
+    del pipeline
+    if selector is None:
+        del ps_selector
+    torch.cuda.empty_cache()
+    print("Validation take time")
+    print(time.time() - time_begin)
+    return images
 
 
 def parse_args():
@@ -294,7 +383,7 @@ def parse_args():
     parser.add_argument(
         "--report_to",
         type=str,
-        default="tensorboard",
+        default="wandb",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
@@ -355,6 +444,12 @@ def parse_args():
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
+        "--sft_lambda",
+        type=float,
+        default=0.0,
+        help="lambda used for prior knowledge for sft",
+    )
+    parser.add_argument(
         "--split", type=str, default='train', help="Datasplit"
     )
     parser.add_argument(
@@ -381,8 +476,10 @@ def parse_args():
             args.resolution = 1024
         else:
             args.resolution = 512
-            
+
     args.train_method = 'sft' if args.sft else 'dpo'
+    # args.report_to = ["wandb", "tensorboard"]
+    print(args)
     return args
 
 
@@ -444,6 +541,7 @@ def main():
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        kwargs_handlers= [InitProcessGroupKwargs(timeout=timedelta(seconds=7200)),]
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -598,7 +696,8 @@ def main():
         text_encoder_two.requires_grad_(False)
     else:
         text_encoder.requires_grad_(False)
-    if args.train_method == 'dpo': ref_unet.requires_grad_(False)
+    if args.train_method == 'dpo': 
+        ref_unet.requires_grad_(False)
 
     # xformers efficient attention
     if is_xformers_available():
@@ -659,6 +758,7 @@ def main():
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
+    # lr正比于真正的batchsize 
     if args.scale_lr:
         args.learning_rate = (
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
@@ -708,7 +808,10 @@ def main():
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
+    # dataset["train"] = dataset["train"].select(range(10000))
     column_names = dataset[args.split].column_names
+    args.validation_prompts = dataset["validation_unique"]['caption']
+    assert len(args.validation_prompts) == 500
 
     # 6. Get the column names for input/target.
     dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
@@ -767,7 +870,7 @@ def main():
     ##### START BIG OLD DATASET BLOCK #####
     
     #### START PREPROCESSING/COLLATION ####
-    if args.train_method == 'dpo':
+    if args.train_method == 'dpo' or args.sft_lambda > 0.0:
         print("Ignoring image_column variable, reading from jpg_0 and jpg_1")
         def preprocess_train(examples):
             all_pixel_values = []
@@ -819,12 +922,18 @@ def main():
                 from utils.aes_utils import Selector
             selector = Selector('cpu' if args.sdxl else accelerator.device)
 
-            def do_flip(jpg0, jpg1, prompt):
-                scores = selector.score([jpg0, jpg1], prompt)
-                return scores[1] > scores[0]
-            def choice_model_says_flip(batch):
-                assert len(batch['caption'])==1 # Can switch to iteration but not needed for nwo
-                return do_flip(batch['jpg_0'][0], batch['jpg_1'][0], batch['caption'][0])
+            # def do_flip(jpg0, jpg1, prompt):
+            #     scores = selector.score([jpg0, jpg1], prompt)
+            #     return scores[1] > scores[0]
+
+            # def choice_model_says_flip(batch):
+            #     assert len(batch['caption'])==1 # Can switch to iteration but not needed for nwo
+            #     return do_flip(batch['jpg_0'][0], batch['jpg_1'][0], batch['caption'][0])
+
+            def eval_scores(batch):
+                scores_0 = selector.score(batch['jpg_0'], batch['caption'])
+                scores_1 = selector.score(batch['jpg_1'], batch['caption'])
+                return scores_0, scores_1
     elif args.train_method == 'sft':
         def preprocess_train(examples):
             if 'pickapic' in args.dataset_name:
@@ -890,10 +999,14 @@ def main():
     
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps) # 如果len(train_dataloader)数据集被splict成为batch然后分割到不同卡上之后bacth的数量，那么num_update_steps_per_epoch指的就是一个epoch神经网络会被update几次
+    print("########")
+    print(len(train_dataloader))
+    print(num_update_steps_per_epoch)
+    print("########")
     if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch # 如果训练步数没有被指定，则从num_train_epochs推断训练步数
+        overrode_max_train_steps = True # 这个flag的意思就是  max_train_steps是由epoch数目算出来的
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -941,17 +1054,21 @@ def main():
     
     
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps) #（这个上面已经算过了，只是重算了下,为啥要重算我不知道）len(train_dataloader)是数据集被splict成为batch然后分割到不同卡上之后bacth的数量，num_update_steps_per_epoch指的就是一个epoch 神经网络会被update几次
     if overrode_max_train_steps:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch # 似乎意思是上面算的不准 这里重算了一遍
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch) # 这里很奇怪，重新计算了Num Epochs，大体上它要么和原来的num_train_epochs差不多，要么就试从step数字下推出来的
+    print("########2")
+    print(len(train_dataloader))
+    print(num_update_steps_per_epoch)
+    print("########2")
+    
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
-        accelerator.init_trackers(args.tracker_project_name, tracker_config)
+        accelerator.init_trackers(args.tracker_project_name, tracker_config, init_kwargs={"wandb":{"name": os.path.basename(args.output_dir)}})
 
     # Training initialization
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -984,41 +1101,79 @@ def main():
             )
             args.resume_from_checkpoint = None
         else:
+            # 如果load了一个pretrain ckpt
             accelerator.print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(args.output_dir, path))
-            global_step = int(path.split("-")[1])
+            global_step = int(path.split("-")[1]) # 设置global step从pretrain哪一步开始
 
-            resume_global_step = global_step * args.gradient_accumulation_steps
-            first_epoch = global_step // num_update_steps_per_epoch
-            resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
+            resume_load_step = global_step * args.gradient_accumulation_steps # 这个标题不准，大致意思是load step（for循环的实际次数
+            first_epoch = global_step // num_update_steps_per_epoch # 万一之前那个方法是3个epoch呢？关键是现在的代码是不会进行epoch转移的，这里很奇怪？若我们理解错了。如果我们理解错了，那这句话的意思就是上一次训练到第几个epoch了，这里继续
+            resume_step = resume_load_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
         
 
     # Bram Note: This was pretty janky to wrangle to look proper but works to my liking now
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
-
+    try:
+        print("*****************************")
+        print(first_epoch)
+        print(num_update_steps_per_epoch)
+        print(global_step)
+        print(args.resume_from_checkpoint)
+        print(not args.hard_skip_resume)
+        print(resume_step)
+        print(resume_load_step)
+        print("*****************************")
+    except:
+        pass
         
     #### START MAIN TRAINING LOOP #####
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         train_loss = 0.0
         implicit_acc_accumulated = 0.0
-        for step, batch in enumerate(train_dataloader):
+        print(len(train_dataloader))
+        if accelerator.is_main_process:
+            log_validation(
+                vae,
+                text_encoder,
+                tokenizer,
+                unet,
+                ref_unet,
+                args,
+                accelerator,
+                weight_dtype,
+                0,
+                selector if args.choice_model else None,
+            )
+        accelerator.wait_for_everyone()
+
+        for step, batch in enumerate(train_dataloader): # pixel values <1,6,512,512>
+            # 循环完一次数据集就退出
             # Skip steps until we reach the resumed step
+            if step < 2:
+                print(batch['pixel_values'].shape)
+                print(batch['input_ids'].shape)
             if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step and (not args.hard_skip_resume):
                 if step % args.gradient_accumulation_steps == 0:
                     print(f"Dummy processing step {step}, will start training at {resume_step}")
                 continue
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-                if args.train_method == 'dpo':
+                if args.train_method == 'dpo'or args.sft_lambda > 0.0:
                     # y_w and y_l were concatenated along channel dimension
-                    feed_pixel_values = torch.cat(batch["pixel_values"].chunk(2, dim=1))
+                    good_values, bad_values = batch["pixel_values"].chunk(2, dim=1)
                     # If using AIF then we haven't ranked yet so do so now
                     # Only implemented for BS=1 (assert-protected)
                     if args.choice_model:
-                        if choice_model_says_flip(batch):
-                            feed_pixel_values = feed_pixel_values.flip(0)
+                        scores_0, scores_1 = eval_scores(batch)
+                        wins = torch.stack([good_values[j] if scores_0[j] > scores_1[j] else bad_values[j] for j in range(len(scores_0))])
+                        losses = torch.stack([bad_values[j] if scores_0[j] > scores_1[j] else good_values[j] for j in range(len(scores_0))])
+                        good_values = wins
+                        bad_values = losses
+                        # if choice_model_says_flip(batch):
+                        #     feed_pixel_values = feed_pixel_values.flip(0) # feed_pixel_values <2,3,512,512>
+                    feed_pixel_values = torch.cat([good_values, bad_values])  # 把数据concat到了一起
                 elif args.train_method == 'sft':
                     feed_pixel_values = batch["pixel_values"]
                 
@@ -1029,7 +1184,7 @@ def main():
                     latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                noise = torch.randn_like(latents) # <2,4,64,64>
                 # variants of noising
                 if args.noise_offset: # haven't tried yet
                     # https://www.crosslabs.org//blog/diffusion-with-offset-noise
@@ -1039,7 +1194,7 @@ def main():
                 if args.input_perturbation: # haven't tried yet
                     new_noise = noise + args.input_perturbation * torch.randn_like(noise)
                     
-                bsz = latents.shape[0]
+                bsz = latents.shape[0] # 这个bsz一定是2的倍数
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
@@ -1052,10 +1207,18 @@ def main():
                 
                 if args.train_method == 'dpo': # make timesteps and noise same for pairs in DPO
                     timesteps = timesteps.chunk(2)[0].repeat(2)
-                    noise = noise.chunk(2)[0].repeat(2, 1, 1, 1)
+                    noise = noise.chunk(2)[0].repeat(2, 1, 1, 1) # 就是对于好坏图片用了相同的noise 跟论文不一样，而且偷偷删掉一部分数据
+                elif args.sft_lambda > 0.0:
+                    timesteps = timesteps.chunk(2)[0]
+                    noise = noise.chunk(2)[0]
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
+                if args.sft_lambda > 0.0:
+                    prefered_latents, disprefered_latents = latents.chunk(2)
+                    difference = prefered_latents - disprefered_latents
+                    sft_lambda_offset = args.sft_lambda * (1 - epoch / args.num_train_epochs) ** 2 * difference
+                    latents += sft_lambda_offset
                 
                 noisy_latents = noise_scheduler.add_noise(latents,
                                                           new_noise if args.input_perturbation else noise,
@@ -1114,7 +1277,7 @@ def main():
                 model_pred = unet(
                                 *model_batch_args,
                                   added_cond_kwargs = added_cond_kwargs
-                                 ).sample
+                                 ).sample # 就是epsilon theta呗，target就是latent shape的noise
                 #### START LOSS COMPUTATION ####
                 if args.train_method == 'sft': # SFT, casting for F.mse_loss
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
@@ -1185,7 +1348,7 @@ def main():
                         logger.info(f"Saved state to {save_path}")
                         logger.info("Pretty sure saving/loading is fixed but proceed cautiously")
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "sft_lambda": args.sft_lambda * (1 - epoch / args.num_train_epochs)}
             if args.train_method == 'dpo':
                 logs["implicit_acc"] = avg_acc
             progress_bar.set_postfix(**logs)
@@ -1193,9 +1356,26 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
+            if accelerator.sync_gradients:
+                if args.validation_prompts is not None and (global_step % 100 == 99 or global_step == args.max_train_steps-1):
+                    if accelerator.is_main_process:
+                        log_validation(
+                            vae,
+                            text_encoder,
+                            tokenizer,
+                            unet,
+                            ref_unet,
+                            args,
+                            accelerator,
+                            weight_dtype,
+                            global_step,
+                            selector if args.choice_model else None,
+                        )
+                    accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     # This will save to top level of output_dir instead of a checkpoint directory
+    print("post-training procedure begins")
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)

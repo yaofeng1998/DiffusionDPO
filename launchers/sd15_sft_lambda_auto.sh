@@ -7,6 +7,8 @@ export CACHE_DIR="$HOME/cephfs-thu/.cache"
 # Paper used 2048. Training takes ~24 hours / 2000 steps
 NUM_PROCESSES=$(($1))
 BATCH_SIZE=$(($2))
+LAMBDA=$3
+TODAY=$(date +'%m%d')
 LENGTH_LIMIT=$((2 * $NUM_PROCESSES - 1))
 DATALOADER_NUM_WORKERS=$((2 * $NUM_PROCESSES))
 GRADIENT_ACCUMULATION_STEPS=$((2048 / $NUM_PROCESSES / $BATCH_SIZE))
@@ -33,6 +35,6 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=${GPUs} accelerate launch --num_processe
   --learning_rate=1e-8 --scale_lr \
   --checkpointing_steps 500 \
   --sft \
-  --sft_lambda 0.2 \
+  --sft_lambda $LAMBDA \
   --cache_dir=$CACHE_DIR \
-   --output_dir="tmp-sd15-sft-lambda-0.2-0403" > sd15-sft-lambda-0.2-0403.txt 2>&1 &
+   --output_dir="tmp-sd15-sft-lambda-$LAMBDA-$TODAY" > sd15-sft-lambda-$LAMBDA-$TODAY.txt 2>&1 &

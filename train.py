@@ -871,7 +871,7 @@ def main():
     ##### START BIG OLD DATASET BLOCK #####
     
     #### START PREPROCESSING/COLLATION ####
-    if args.train_method == 'dpo' or args.sft_lambda > 0.0:
+    if args.train_method == 'dpo' or args.sft_lambda != 0.0:
         print("Ignoring image_column variable, reading from jpg_0 and jpg_1")
         def preprocess_train(examples):
             all_pixel_values = []
@@ -1161,7 +1161,7 @@ def main():
                 continue
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-                if args.train_method == 'dpo'or args.sft_lambda > 0.0:
+                if args.train_method == 'dpo'or args.sft_lambda != 0.0:
                     # y_w and y_l were concatenated along channel dimension
                     good_values, bad_values = batch["pixel_values"].chunk(2, dim=1)
                     # If using AIF then we haven't ranked yet so do so now
@@ -1209,17 +1209,14 @@ def main():
                 if args.train_method == 'dpo': # make timesteps and noise same for pairs in DPO
                     timesteps = timesteps.chunk(2)[0].repeat(2)
                     noise = noise.chunk(2)[0].repeat(2, 1, 1, 1) # 就是对于好坏图片用了相同的noise 跟论文不一样，而且偷偷删掉一部分数据
-                elif args.sft_lambda > 0.0:
-                    timesteps = timesteps.chunk(2)[0]
-                    noise = noise.chunk(2)[0]
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                if args.sft_lambda > 0.0:
+                if args.sft_lambda != 0.0:
                     prefered_latents, disprefered_latents = latents.chunk(2)
-                    difference = prefered_latents - disprefered_latents
-                    sft_lambda_offset = args.sft_lambda * (1 - epoch / args.num_train_epochs) ** 2 * difference
-                    latents = prefered_latents + sft_lambda_offset
+                    difference = disprefered_latents - prefered_latents
+                    sft_lambda_offset = args.sft_lambda * (1 - epoch / max(1, args.num_train_epochs - 1)) * difference
+                    latents[bsz // 2:] = prefered_latents + sft_lambda_offset
                 
                 noisy_latents = noise_scheduler.add_noise(latents,
                                                           new_noise if args.input_perturbation else noise,
@@ -1262,7 +1259,7 @@ def main():
                 else: # sd1.5
                     # Get the text embedding for conditioning
                     encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-                    if args.train_method == 'dpo':
+                    if args.train_method == 'dpo' or args.sft_lambda != 0.0:
                         encoder_hidden_states = encoder_hidden_states.repeat(2, 1, 1)
                 #### END PREP BATCH ####
                         
@@ -1349,7 +1346,7 @@ def main():
                         logger.info(f"Saved state to {save_path}")
                         logger.info("Pretty sure saving/loading is fixed but proceed cautiously")
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "sft_lambda": args.sft_lambda * (1 - epoch / args.num_train_epochs)}
+            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "sft_lambda": args.sft_lambda * (1 - epoch / max(1, args.num_train_epochs - 1))}
             if args.train_method == 'dpo':
                 logs["implicit_acc"] = avg_acc
             progress_bar.set_postfix(**logs)
